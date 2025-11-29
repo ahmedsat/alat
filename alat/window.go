@@ -2,6 +2,7 @@ package alat
 
 import (
 	"bytes"
+	"embed"
 	"errors"
 	"fmt"
 	"image/color"
@@ -194,6 +195,9 @@ func (Args *QrArgs) validate() error {
 	return err
 }
 
+//go:embed shaders/*
+var ShaderFiles embed.FS
+
 func (wc *WindowCreator) Qr(Args QrArgs, result *string) error {
 
 	var sh gl.Shader
@@ -249,7 +253,15 @@ func (wc *WindowCreator) Qr(Args QrArgs, result *string) error {
 				return err
 			}
 
-			sh, err = gl.NewShader("shaders/qr.vert", "shaders/qr.frag")
+			vertexSource, err := ShaderFiles.ReadFile("shaders/qr.vert")
+			if err != nil {
+				return err
+			}
+			fragmentSource, err := ShaderFiles.ReadFile("shaders/qr.frag")
+			if err != nil {
+				return err
+			}
+			sh, err = gl.NewShader(string(vertexSource), string(fragmentSource))
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
