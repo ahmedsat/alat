@@ -18,7 +18,8 @@ import (
 
 type Window struct {
 	window.Window
-	Show func()
+	QrTex gl.TextureId
+	Show  func()
 }
 
 type NonThreadSafe struct {
@@ -36,6 +37,11 @@ func NewWindowCreator() *WindowCreator {
 		map[string]*Window{},
 		make(chan NonThreadSafe),
 	}
+}
+
+func (wc *WindowCreator) NonThreadSafeExec(nts NonThreadSafe) error {
+	wc.NonThreadSafe <- nts
+	return <-nts.Err
 }
 
 func (wc *WindowCreator) Show() {
@@ -114,41 +120,43 @@ func (Args *SolidColorArgs) validate() error {
 
 func (wc *WindowCreator) Solid(Args SolidColorArgs, result *string) error {
 	*result = ""
-	nts := NonThreadSafe{
+
+	err := Args.validate()
+	if err != nil {
+		*result = err.Error()
+		return nil
+	}
+
+	show := func() {
+		gl.ClearColor(Args.Color)
+		gl.Clear(gl.COLOR_BUFFER_BIT)
+	}
+
+	if wc.Windows[Args.Id] != nil {
+		*result = fmt.Sprintf("Window with id %s already exists and will be overwritten", Args.Id)
+		wc.Windows[Args.Id].SetTitle(Args.Title)
+		wc.Windows[Args.Id].SetSize(Args.Width, Args.Height)
+		wc.Windows[Args.Id].Show = show
+		return nil
+	}
+
+	wc.Windows[Args.Id] = &Window{}
+	err = wc.NonThreadSafeExec(NonThreadSafe{
 		Func: func() error {
-
-			err := Args.validate()
-			if err != nil {
-				*result = err.Error()
-				return nil
-			}
-
-			show := func() {
-				gl.ClearColor(Args.Color)
-				gl.Clear(gl.COLOR_BUFFER_BIT)
-			}
-
-			if wc.Windows[Args.Id] != nil {
-				*result = fmt.Sprintf("Window with id %s already exists and will be overwritten", Args.Id)
-				wc.Windows[Args.Id].SetTitle(Args.Title)
-				wc.Windows[Args.Id].SetSize(Args.Width, Args.Height)
-				wc.Windows[Args.Id].Show = show
-				return nil
-			}
-
-			w, err := window.NewWindow(Args.Width, Args.Height, Args.Title)
+			wc.Windows[Args.Id].Window, err = window.NewWindow(Args.Width, Args.Height, Args.Title)
 			if err != nil {
 				return err
 			}
-			wc.Windows[Args.Id] = &Window{w, show}
+			wc.Windows[Args.Id].Show = show
 			return nil
 		},
 		Err: make(chan error),
+	})
+	if err != nil {
+		return err
 	}
 
-	wc.NonThreadSafe <- nts
-
-	return <-nts.Err
+	return nil
 }
 
 type QrArgs struct {
@@ -187,59 +195,67 @@ func (Args *QrArgs) validate() error {
 }
 
 func (wc *WindowCreator) Qr(Args QrArgs, result *string) error {
+
+	var sh gl.Shader
+	var vao gl.VertexArrayId
+
 	*result = ""
-	nts := NonThreadSafe{
+
+	err := Args.validate()
+	if err != nil {
+		*result = err.Error()
+		return nil
+	}
+
+	if window := wc.Windows[Args.Id]; window != nil {
+		*result = fmt.Sprintf("Window with id %s already exists", Args.Id)
+		wc.Windows[Args.Id].SetTitle(Args.Title)
+		wc.Windows[Args.Id].SetSize(Args.Size, Args.Size)
+
+		err := wc.NonThreadSafeExec(NonThreadSafe{
+			Func: func() error {
+				newTex, err := qrToTexture(Args.Text, Args.Size, qrcode.RecoveryLevel(Args.RecoveryLevel))
+				if err != nil {
+					return err
+				}
+				newTex, window.QrTex = window.QrTex, newTex
+				newTex.Delete()
+
+				return nil
+			},
+			Err: make(chan error),
+		})
+
+		return err
+	}
+
+	var vertices = []float32{
+		1, 1, 1, 0, // top right
+		1, -1, 1, 1, // bottom right
+		-1, -1, 0, 1, // bottom left
+		-1, 1, 0, 0, // top left
+	}
+	var indices = []uint32{ // note that we start from 0!
+		0, 1, 3, // first triangle
+		1, 2, 3, // second triangle
+	}
+
+	wc.Windows[Args.Id] = &Window{}
+
+	err = wc.NonThreadSafeExec(NonThreadSafe{
 		Func: func() error {
-
-			err := Args.validate()
-			if err != nil {
-				*result = err.Error()
-				return nil
-			}
-
-			if wc.Windows[Args.Id] != nil {
-				*result = fmt.Sprintf("Window with id %s already exists", Args.Id)
-
-				return nil
-			}
-
-			var vertices = []float32{
-				1, 1, 1, 0, // top right
-				1, -1, 1, 1, // bottom right
-				-1, -1, 0, 1, // bottom left
-				-1, 1, 0, 0, // top left
-			}
-			var indices = []uint32{ // note that we start from 0!
-				0, 1, 3, // first triangle
-				1, 2, 3, // second triangle
-			}
-
-			var pngBytes []byte
-			pngBytes, err = qrcode.Encode(Args.Text, qrcode.RecoveryLevel(Args.RecoveryLevel), Args.Size)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-
-			img, err := png.Decode(bytes.NewBuffer(pngBytes))
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-
-			w, err := window.NewWindow(Args.Size, Args.Size, Args.Title)
+			wc.Windows[Args.Id].Window, err = window.NewWindow(Args.Size, Args.Size, Args.Title)
 			if err != nil {
 				return err
 			}
-			wc.Windows[Args.Id] = &Window{w, nil}
 
-			sh, err := gl.NewShader("shaders/qr.vert", "shaders/qr.frag")
+			sh, err = gl.NewShader("shaders/qr.vert", "shaders/qr.frag")
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
 
-			vao := gl.GenVertexArray()
+			vao = gl.GenVertexArray()
 			vao.Bind()
 
 			vbo := gl.GenBuffer()
@@ -251,24 +267,50 @@ func (wc *WindowCreator) Qr(Args QrArgs, result *string) error {
 			gl.VertexAttribPointer(0, 2, gl.FLOAT, false, 4*4, 0)
 			gl.VertexAttribPointer(1, 2, gl.FLOAT, false, 4*4, 2*4)
 
-			tex, err := gl.NewTextureFromImage(img)
+			wc.Windows[Args.Id].QrTex, err = qrToTexture(Args.Text, Args.Size, qrcode.RecoveryLevel(Args.RecoveryLevel))
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
 
-			wc.Windows[Args.Id].Show = func() {
-				tex.Bind()
-
-				sh.Use()
-				vao.Bind()
-
-				gl.DrawElements(gl.TRIANGLES, 6, gl.UNSIGNED_INT, 0)
-			}
 			return nil
 		},
 		Err: make(chan error),
+	})
+	if err != nil {
+		return err
 	}
-	wc.NonThreadSafe <- nts
-	return <-nts.Err
+
+	wc.Windows[Args.Id].Show = func() {
+		wc.Windows[Args.Id].QrTex.Bind()
+
+		sh.Use()
+		vao.Bind()
+
+		gl.DrawElements(gl.TRIANGLES, 6, gl.UNSIGNED_INT, 0)
+	}
+
+	return nil
+}
+
+func qrToTexture(text string, size int, level qrcode.RecoveryLevel) (tex gl.TextureId, err error) {
+	var pngBytes []byte
+	pngBytes, err = qrcode.Encode(text, level, size)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	img, err := png.Decode(bytes.NewBuffer(pngBytes))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	tex, err = gl.NewTextureFromImage(img)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return
 }
